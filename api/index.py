@@ -1,33 +1,14 @@
-from flask import Flask, jsonify
-from flask_cors import CORS
-import requests
-import base64
-import json
+from flask import Flask, jsonify, request
+import requests, base64, secrets, json, time
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP, AES
+from Crypto.Hash import SHA256
+from Crypto.Util.Padding import pad, unpad
 import os
 
-# ===== UMANG Encryption (cryptography) =====
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding as asym
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding as sym
-
 app = Flask(__name__)
-CORS(app)
 
-# ===================== CONFIG: UMANG Ration Info =====================
-GATEWAY = "https://apigw.umangapp.in/onorcApi/ws1/getrationcard"
-
-PUB = b"""-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArpgmSqIv/3zYAxoNK/6e
-LqjeBEHFsiGJCia5wdQuhCw54ceg6EyKc5mPrkEnK7CYgbJxSQO37HbnWIROMN6k
-RQqxa1kZFFS+xQPZ9z4Gs+njypX8HNKcse2/kbwbIX4y8kcCENVVOV8URK8+znEs
-uN/UCzJXv2Pg0KII5ofb8wAvYNXkZ44DhcWnyxO6JohbuMvpt096NBkdq8lWtRra
-ppL3HqpTG4Fd5H4v9b7fD8rAhBB8cAbiM2nyBz51VDovS/SZheIemKjwGLGMDiMe
-NcQGryOTZASX+jxe69NoFR9bQ8+5jN/88x5k53UzV8en+HRKbYjgUJzZOVfu3fL/
-WQIDAQAB
------END PUBLIC KEY-----"""
-
-PRIV = b"""-----BEGIN PRIVATE KEY-----
+PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCumCZKoi//fNgD
 Gg0r/p4uqN4EQcWyIYkKJrnB1C6ELDnhx6DoTIpzmY+uQScrsJiBsnFJA7fsdudY
 hE4w3qRFCrFrWRkUVL7FA9n3Pgaz6ePKlfwc0pyx7b+RvBshfjLyRwIQ1VU5XxRE
@@ -56,73 +37,185 @@ s8YE8AAd+2iv8I61gF475KAOOMbkt21TzTI0y2R2BN3JvB1iTmf6CkV6C82b4UEL
 lKjEOX342756ZWQbhB8Yld1T
 -----END PRIVATE KEY-----"""
 
-_pub = serialization.load_pem_public_key(PUB)
-_priv = serialization.load_pem_private_key(PRIV, password=None)
-_oaep = asym.OAEP(mgf=asym.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArpgmSqIv/3zYAxoNK/6e
+LqjeBEHFsiGJCia5wdQuhCw54ceg6EyKc5mPrkEnK7CYgbJxSQO37HbnWIROMN6k
+RQqxa1kZFFS+xQPZ9z4Gs+njypX8HNKcse2/kbwbIX4y8kcCENVVOV8URK8+znEs
+uN/UCzJXv2Pg0KII5ofb8wAvYNXkZ44DhcWnyxO6JohbuMvpt096NBkdq8lWtRra
+ppL3HqpTG4Fd5H4v9b7fD8rAhBB8cAbiM2nyBz51VDovS/SZheIemKjwGLGMDiMe
+NcQGryOTZASX+jxe69NoFR9bQ8+5jN/88x5k53UzV8en+HRKbYjgUJzZOVfu3fL/
+WQIDAQAB
+-----END PUBLIC KEY-----"""
 
-SESSION = {
-    "tkn": "mk27c18eec-0c0d-4b14-aff1-1b2bf90e4642/2", "trkr": "213132", "lang": "en",
-    "lat": "21", "lon": "90", "lac": "90", "usag": "90", "apitrkr": "123234",
-    "usrid": "4088903933", "mode": "web", "pltfrm": "linux", "did": "123234",
-    "deptid": "317", "formtrkr": "0", "srvid": "1519", "subsid": "0", "subsid2": "0",
-    "sessionId": "571998755919145", "userName": "umang", "idType": "R", "token": "Um@93259@"
-}
+UMANG_TKN = "mnf4758232-9b59-4dd4-bb68-f2d8c1cbef70/1"
+UMANG_UID = "4088903933"
+API_KEY   = "VKE9PnbY5k1ZYapR5PyYQ33I26sXTX569Ed7eqyg"
 
-UMANG_HEADERS = {
-    "User-Agent": "Mozilla/5.0", "Accept": "application/json", "Content-Type": "application/json",
-    "subsid": "0", "subsid2": "0", "deptid": "317", "tenantid": "", "formtrkr": "0",
-    "x-api-key": "VKE9PnbY5k1ZYapR5PyYQ33I26sXTX569Ed7eqyg", "srvid": "1519"
-}
+# ==================== CRYPTO ====================
+def encrypt(data: dict) -> str:
+    pub = RSA.import_key(PUBLIC_KEY)
+    key = secrets.token_bytes(32)
+    iv  = secrets.token_bytes(16)
+    ct  = AES.new(key, AES.MODE_CBC, iv).encrypt(
+              pad(json.dumps(data, separators=(',',':')).encode(), 16))
+    rsa = PKCS1_OAEP.new(pub, hashAlgo=SHA256)
+    return (base64.b64encode(rsa.encrypt(key)).decode() + ":" +
+            base64.b64encode(rsa.encrypt(iv)).decode()  + ":" +
+            base64.b64encode(ct).decode())
 
-def umang_encrypt(plaintext: str) -> str:
-    aes_key, iv = os.urandom(32), os.urandom(16)
-    padder = sym.PKCS7(128).padder()
-    padded = padder.update(plaintext.encode()) + padder.finalize()
-    encryptor = Cipher(algorithms.AES(aes_key), modes.CBC(iv)).encryptor()
-    ct = encryptor.update(padded) + encryptor.finalize()
-    ek, eiv = _pub.encrypt(aes_key, _oaep), _pub.encrypt(iv, _oaep)
-    return ":".join(base64.b64encode(x).decode() for x in (ek, eiv, ct))
+def decrypt(body: str) -> dict:
+    parts = body.strip().split(":")
+    priv  = RSA.import_key(PRIVATE_KEY)
+    rsa   = PKCS1_OAEP.new(priv, hashAlgo=SHA256)
+    key   = rsa.decrypt(base64.b64decode(parts[0]))
+    iv    = rsa.decrypt(base64.b64decode(parts[1]))
+    ct    = base64.b64decode(parts[2])
+    pt    = unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(ct), 16)
+    return json.loads(pt.decode())
 
-def umang_decrypt(blob: str) -> str:
-    parts = blob.strip().split(":")
-    if len(parts) == 3:
-        aes_key = _priv.decrypt(base64.b64decode(parts[0]), _oaep)
-        iv = _priv.decrypt(base64.b64decode(parts[1]), _oaep)
-        ct = base64.b64decode(parts[2])
-    elif len(parts) == 2:
-        aes_key = _priv.decrypt(base64.b64decode(parts[0]), _oaep)
-        ct = base64.b64decode(parts[1])
-        iv, ct = ct[:16], ct[16:]
-    
-    decryptor = Cipher(algorithms.AES(aes_key), modes.CBC(iv)).decryptor()
-    raw = decryptor.update(ct) + decryptor.finalize()
-    unpadder = sym.PKCS7(128).unpadder()
-    return (unpadder.update(raw) + unpadder.finalize()).decode("utf-8")
+# ==================== ONORC HEADERS ====================
+def get_onorc_headers():
+    return {
+        "x-api-key": API_KEY,
+        "content-type": "application/json",
+        "accept": "application/json",
+        "deptid": "317",
+        "srvid": "1519",
+        "subsid": "0",
+        "subsid2": "0",
+        "formtrkr": "0",
+        "tenantid": "",
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "origin": "https://web.umang.gov.in",
+        "referer": "https://web.umang.gov.in/",
+        "accept-language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7,hi;q=0.6",
+        "sec-ch-ua": '"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-dest": "empty",
+    }
 
-def get_umang_ration_info(ration_number: str) -> dict:
-    body = dict(SESSION)
-    body["id"] = ration_number
-    payload = umang_encrypt(json.dumps(body, separators=(",", ":")))
-    r = requests.post(GATEWAY, data=payload, headers=UMANG_HEADERS, timeout=20)
-    try: return json.loads(r.text)
-    except: return json.loads(umang_decrypt(r.text))
+def onorc_base_body():
+    ts = int(time.time() * 1000)
+    return {
+        "tkn":      UMANG_TKN,
+        "trkr":     str(ts),
+        "lang":     "en",
+        "lat":      "21",
+        "lon":      "90",
+        "lac":      "90",
+        "usag":     "90",
+        "apitrkr":  str(ts),
+        "usrid":    UMANG_UID,
+        "mode":     "web",
+        "pltfrm":   "linux",
+        "did":      str(ts),
+        "deptid":   "317",
+        "formtrkr": "0",
+        "srvid":    "1519",
+        "subsid":   "0",
+        "subsid2":  "0",
+    }
 
-# ===================== FLASK ROUTES =====================
-@app.route("/", methods=["GET"])
-def home():
+def onorc_post_api(url, payload):
+    headers = get_onorc_headers()
+    encrypted_data = encrypt(payload)
+    r = requests.post(url, headers=headers, data=encrypted_data, timeout=25)
+    if r.status_code != 200:
+        raise Exception(f"HTTP {r.status_code}")
+    return decrypt(r.text)
+
+# ==================== ONORC API CALLS ====================
+def onorc_get_ration_card(ration_card_id):
+    url = "https://apigw.umangapp.in/onorcApi/ws1/getrationcard"
+    payload = {
+        **onorc_base_body(),
+        "id": ration_card_id,
+        "sessionId": str(int(time.time() * 1000)),
+        "userName": "umang",
+        "idType": "R",
+        "token": "Um@93259@",
+    }
+    return onorc_post_api(url, payload)
+
+# ==================== ROUTE ====================
+@app.route("/ration/<ration_card_id>")
+def ration_card_info(ration_card_id):
+    ration_card_id = ration_card_id.strip()
+    if not ration_card_id:
+        return jsonify({"found": False, "error": "Ration card number required"}), 400
+
+    result = {
+        "found": False,
+        "rationCardId": ration_card_id,
+    }
+
+    try:
+        response = onorc_get_ration_card(ration_card_id)
+        
+        if response.get("rs") == "S" and response.get("pd"):
+            pd = response["pd"]
+            result["found"] = True
+            
+            # Card details
+            result["cardDetails"] = {
+                "rationCardId": pd.get("rcId"),
+                "homeState": pd.get("homeStateName"),
+                "homeStateCode": pd.get("homeStateCode"),
+                "district": pd.get("homeDistName"),
+                "districtCode": pd.get("districtCode"),
+                "fpsId": pd.get("fpsId"),
+                "scheme": pd.get("schemeName"),
+                "schemeId": pd.get("schemeId"),
+                "address": pd.get("address"),
+                "allowedOnorc": pd.get("allowed_onorc"),
+                "dupUidStatus": pd.get("dup_uid_status"),
+            }
+            
+            # Family members
+            if "memberDetailsList" in pd:
+                members = pd["memberDetailsList"]
+                result["totalMembers"] = len(members)
+                result["familyMembers"] = []
+                
+                for member in members:
+                    result["familyMembers"].append({
+                        "memberId": member.get("memberId"),
+                        "memberName": member.get("memberName"),
+                        "uidAvailable": member.get("uid"),
+                        "relationship": member.get("releationship_name"),
+                        "relationshipCode": member.get("relationship_code"),
+                    })
+                
+                # Find head of family
+                for member in members:
+                    if member.get("relationship_code") == "1":
+                        result["headOfFamily"] = member.get("memberName")
+                        break
+            
+        else:
+            result["error"] = response.get("rd", "No data found")
+            
+    except Exception as e:
+        result["error"] = str(e)
+
+    return jsonify(result)
+
+@app.route("/")
+def index():
     return jsonify({
-        "ok": True,
-        "routes": {
-            "/ration/<ration_number>": "Fetch Ration Card details"
-        }
+        "api": "ONORC Ration Card Info API",
+        "usage": "/ration/{ration_card_id}",
+        "example": "/ration/214740704824",
+        "status": "running"
     })
 
-@app.route("/ration/<number>", methods=["GET"])
-def ration_info(number):
-    try:
-        return jsonify(get_umang_ration_info(number))
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
